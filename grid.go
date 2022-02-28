@@ -1,7 +1,7 @@
 package main
 
 import (
-	"carto/tile"
+	"cartog/tile"
 	"errors"
 	"log"
 )

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"carto/tile"
+	"cartog/tile"
 	"context"
 	"errors"
 	"image"
@@ -184,7 +184,7 @@ func main() {
 	glfw.WindowHint(glfw.ContextVersionMajor, 2)
 	glfw.WindowHint(glfw.ContextVersionMinor, 1)
 
-	window, err := glfw.CreateWindow(SCREEN_X, SCREEN_Y, "Carto", nil, nil)
+	window, err := glfw.CreateWindow(SCREEN_X, SCREEN_Y, "Cartog", nil, nil)
 	if err != nil {
 		panic(err)
 	}

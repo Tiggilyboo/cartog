@@ -1,4 +1,4 @@
-module carto
+module cartog
 
 go 1.17
 
@@ -13,4 +13,4 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 )
 
-replace cargo/tile => ./tile
+replace cartog/tile => ./tile
