@@ -14,10 +14,14 @@ import (
 	"github.com/paulmach/osm/osmapi"
 )
 
+const (
+	DefaultTileProvider = "http://tile.openstreetmap.de"
+)
+
 var DefaultTileDatasource = &TileDatasource{
-	BaseURL: "http://tile.openstreetmap.de",
+	BaseURL: DefaultTileProvider,
 	Client: &http.Client{
-		Timeout: 6 * time.Minute,
+		Timeout: time.Minute,
 	},
 }
 
@@ -88,6 +92,10 @@ func (ds *TileDatasource) constructPngUrl(x uint32, y uint32, z uint32) string {
 }
 
 func (ds *TileDatasource) getPngTileFromAPI(ctx context.Context, x uint32, y uint32, z uint32) (*PngTile, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	client := ds.Client
 	if client == nil {
 		client = DefaultTileDatasource.Client
@@ -97,7 +105,7 @@ func (ds *TileDatasource) getPngTileFromAPI(ctx context.Context, x uint32, y uin
 	}
 
 	url := ds.constructPngUrl(x, y, z)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

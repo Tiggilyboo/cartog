@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	MAX_ZOOM = 17
+	MAX_ZOOM = 16
+	MIN_ZOOM = 2
 )
 
 type Coord struct {
@@ -25,14 +26,13 @@ type TileGrid struct {
 	halfTileHeight   float32
 	screenWidth      float32
 	screenHeight     float32
-	cache            map[tile.TileCoord]tile.PngTile
+	cache            sync.Map
 	loading          sync.Map
-	drawable         map[tile.TileCoord]*tile.PngTile
 	ScreenTileWidth  uint32
 	ScreenTileHeight uint32
 	TilesToLoad      chan tile.TileCoord
 	TilesToExpire    chan tile.TileCoord
-	CancelInflight   chan bool
+	TilesInFlight    chan func()
 }
 
 func (c *Coord) Add(a Coord) {
@@ -46,10 +46,11 @@ func (c *Coord) Add(a Coord) {
 		c.X *= 2.0
 		c.Y *= 2.0
 		c.Z += a.Z
-		if c.Z > MAX_ZOOM {
-			c.Z = MAX_ZOOM
-		}
-		return
+	}
+	if c.Z > MAX_ZOOM {
+		c.Z = MAX_ZOOM
+	} else if c.Z < MIN_ZOOM {
+		c.Z = MIN_ZOOM
 	}
 
 }
@@ -62,13 +63,13 @@ func NewTileGrid(current Coord, tileWidth uint32, tileHeight uint32, screenWidth
 		return nil, errors.New("tile width and height must be positive")
 	}
 
-	return &TileGrid{
-		location:       current,
-		cache:          make(map[tile.TileCoord]tile.PngTile),
-		loading:        sync.Map{},
-		TilesToLoad:    make(chan tile.TileCoord),
-		TilesToExpire:  make(chan tile.TileCoord),
-		CancelInflight: make(chan bool),
+	grid := &TileGrid{
+		location:      current,
+		cache:         sync.Map{},
+		loading:       sync.Map{},
+		TilesToLoad:   make(chan tile.TileCoord),
+		TilesToExpire: make(chan tile.TileCoord),
+		TilesInFlight: make(chan func()),
 
 		tileWidth:        float32(tileWidth),
 		tileHeight:       float32(tileHeight),
@@ -78,7 +79,10 @@ func NewTileGrid(current Coord, tileWidth uint32, tileHeight uint32, screenWidth
 		screenHeight:     float32(screenHeight),
 		ScreenTileWidth:  screenWidth / tileWidth,
 		ScreenTileHeight: screenHeight / tileHeight,
-	}, nil
+	}
+	grid.SetLocation(current)
+
+	return grid, nil
 }
 
 func (t *TileGrid) forEachVisibleTile(f func(tile.TileCoord)) {
@@ -92,6 +96,13 @@ func (t *TileGrid) forEachVisibleTile(f func(tile.TileCoord)) {
 			tX := x / t.tileWidth
 			tY := y / t.tileHeight
 
+			if tX < 0 {
+				tX = 0.0
+			}
+			if tY < 0 {
+				tY = 0
+			}
+
 			tileCoord := tile.TileCoord{
 				X: uint32(tX),
 				Y: uint32(tY),
@@ -103,13 +114,60 @@ func (t *TileGrid) forEachVisibleTile(f func(tile.TileCoord)) {
 	}
 }
 
+func (t *TileGrid) CancelLoadingTiles() {
+	// Drain all loading tiles
+	for {
+		select {
+		case l := <-t.TilesToLoad:
+			log.Printf("De-queued loading tile: %v", l)
+			t.loading.Delete(l)
+			t.cache.Delete(l)
+		case cancel := <-t.TilesInFlight:
+			log.Printf("Canceling fetch context")
+			cancel()
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	t.loading.Range(func(key interface{}, _ interface{}) bool {
+		t.loading.Delete(key)
+		return true
+	})
+}
+
 func (t *TileGrid) Move(delta Coord) {
 	t.location.Add(delta)
 
 	// Cancel any inflight requests before loading a new set of tiles
 	if delta.Z != 0 {
-		t.CancelInflight <- true
+		t.CancelLoadingTiles()
+
+		// De/Inc-rement map further to center on center screen
+		if delta.Z < 0 {
+			t.location.Add(Coord{
+				X: -float32(t.ScreenTileWidth) / 4.0 * t.tileWidth,
+				Y: -float32(t.ScreenTileHeight) / 4.0 * t.tileHeight,
+			})
+		} else {
+			t.location.Add(Coord{
+				X: float32(t.ScreenTileWidth) / 2.0 * t.tileWidth,
+				Y: float32(t.ScreenTileHeight) / 2.0 * t.tileHeight,
+			})
+		}
 	}
+
+	t.SetLocation(t.location)
+}
+
+func (t *TileGrid) SetTile(coord tile.TileCoord, tile tile.PngTile) {
+	t.loading.Delete(coord)
+	t.cache.Store(coord, tile)
+}
+
+func (t *TileGrid) SetLocation(location Coord) {
+	t.location = location
 
 	// ensure all tiles in screen space are loaded / visible
 	t.forEachVisibleTile(func(tileCoord tile.TileCoord) {
@@ -118,7 +176,7 @@ func (t *TileGrid) Move(delta Coord) {
 			if exists {
 				return
 			}
-			_, exists = t.cache[tileCoord]
+			_, exists = t.cache.Load(tileCoord)
 			if exists {
 				return
 			}
@@ -127,11 +185,6 @@ func (t *TileGrid) Move(delta Coord) {
 			t.TilesToLoad <- tileCoord
 		}()
 	})
-}
-
-func (t *TileGrid) SetTile(coord tile.TileCoord, tile tile.PngTile) {
-	t.loading.Delete(coord)
-	t.cache[coord] = tile
 }
 
 func (t *TileGrid) GetLocation() *Coord {
@@ -144,9 +197,10 @@ func (t *TileGrid) Drawable() []*tile.PngTile {
 	i := 0
 
 	t.forEachVisibleTile(func(tileCoord tile.TileCoord) {
-		tile, exists := t.cache[tileCoord]
+		itile, exists := t.cache.Load(tileCoord)
 		if exists {
-			tiles = append(tiles, &tile)
+			pngTile := itile.(tile.PngTile)
+			tiles = append(tiles, &pngTile)
 			i++
 		}
 	})
@@ -155,16 +209,19 @@ func (t *TileGrid) Drawable() []*tile.PngTile {
 }
 
 func (t *TileGrid) All() []*tile.PngTile {
-	tiles := make([]*tile.PngTile, 0, len(t.cache))
-	for _, tile := range t.cache {
-		tiles = append(tiles, &tile)
-	}
+	tiles := []*tile.PngTile{}
+	t.cache.Range(func(_, cachedTile interface{}) bool {
+		pngTile := cachedTile.(tile.PngTile)
+		tiles = append(tiles, &pngTile)
+		return true
+	})
 
 	return tiles
 }
 
 func (t *TileGrid) Close() {
+	log.Printf("grid closing...")
 	close(t.TilesToLoad)
 	close(t.TilesToExpire)
-	close(t.CancelInflight)
+	close(t.TilesInFlight)
 }

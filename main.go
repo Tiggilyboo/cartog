@@ -8,10 +8,10 @@ import (
 	"image/draw"
 	"log"
 	"runtime"
+	"time"
 
 	"github.com/go-gl/gl/v2.1/gl"
 	"github.com/go-gl/glfw/v3.3/glfw"
-	"github.com/paulmach/osm/osmapi"
 )
 
 const (
@@ -40,31 +40,21 @@ func doWork(f func()) {
 	<-done
 }
 
-func fetchTile(x uint32, y uint32, z uint32, cancel chan bool) (*tile.PngTile, error) {
+func fetchTile(x uint32, y uint32, z uint32, cancel chan func()) (*tile.PngTile, error) {
 	log.Printf("fetching tile (%d, %d, %d)", x, y, z)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-cancel:
-				log.Printf("Cancelling in-flight tile fetch (%d %d %d)", x, y, z)
-				cancelCtx()
-			}
-		}
+		cancel <- cancelCtx
 	}()
 
 	t, err := tile.Tile(ctx, x, y, z)
 	if err != nil {
-		// TODO: Handle 404 in a more meaningful way when out of bounds etc.
-		var nfe *osmapi.NotFoundError
-		if errors.As(err, &nfe) {
-			log.Fatalf("%s", nfe.Error())
-			return tile.EmptyPngTile(x, y, z, TILE_X, TILE_Y)
+		// Cancelled, return empty on both counts
+		if ctx.Err() == context.Canceled {
+			return nil, nil
 		}
-		log.Fatalf("%s", err)
+
 		return nil, err
 	}
 
@@ -132,34 +122,40 @@ func drawTile(origin *Coord, coord *tile.TileCoord, texture *uint32) {
 }
 
 func handleTileLoading(grid *TileGrid) {
-	go func() {
-		log.Printf("Starting tile fetching goroutine")
-		defer grid.Close()
+	log.Printf("Starting tile fetching goroutine")
+	defer grid.Close()
 
-		for t := range grid.TilesToLoad {
-			go func(t tile.TileCoord) {
-				log.Printf("texture request %d %d", t.X, t.Y)
-				pngTile, err := fetchTile(t.X, t.Y, t.Z, grid.CancelInflight)
+	for t := range grid.TilesToLoad {
+		go func(t tile.TileCoord) {
+			log.Printf("tile fetch %d %d %d", t.X, t.Y, t.Z)
+			pngTile, err := fetchTile(t.X, t.Y, t.Z, grid.TilesInFlight)
+			if err != nil {
+				log.Printf("fetch error: %s", err)
+				return
+			}
+			// When a tile is canceled
+			if pngTile == nil {
+				return
+			}
+
+			// Texture already loaded
+			if pngTile.Texture != nil {
+				return
+			}
+
+			// Textures / GL must be done in main thread
+			doWork(func() {
+				log.Printf("Loading GL texture for tile %d %d", pngTile.Tile.X, pngTile.Tile.Y)
+				texture, err := loadTexture(pngTile)
 				if err != nil {
-					log.Fatalf("%s", err)
 					return
 				}
+				pngTile.Texture = texture
 
-				// Textures / GL must be done in main thread
-				doWork(func() {
-					log.Printf("Loading GL texture for tile %d %d", pngTile.Tile.X, pngTile.Tile.Y)
-					texture, err := loadTexture(pngTile)
-					if err != nil {
-						log.Fatalf("%s", err)
-						return
-					}
-					pngTile.Texture = texture
-
-					grid.SetTile(t, *pngTile)
-				})
-			}(t)
-		}
-	}()
+				grid.SetTile(t, *pngTile)
+			})
+		}(t)
+	}
 }
 
 func bindInput(w *glfw.Window) (delta chan Coord) {
@@ -219,7 +215,6 @@ func bindInput(w *glfw.Window) (delta chan Coord) {
 		if mouseButton != glfw.MouseButtonLeft {
 			return
 		}
-		log.Printf("mouse button %v action %v (%f, %f)", mouseButton, mouseButtonAction, mousePosX, mousePosY)
 
 		switch mouseButtonAction {
 		case glfw.Release:
@@ -252,6 +247,17 @@ func bindInput(w *glfw.Window) (delta chan Coord) {
 	})
 
 	return delta
+}
+
+func cleanup(grid *TileGrid) {
+	log.Println("Quitting...")
+	for _, tile := range grid.All() {
+		if tile.Texture == nil {
+			continue
+		}
+
+		gl.DeleteTextures(1, tile.Texture)
+	}
 }
 
 func main() {
@@ -295,6 +301,9 @@ func main() {
 		}
 	}()
 
+	frames := 0
+	lastTick := time.Now()
+
 	log.Println("Starting main loop")
 	for !window.ShouldClose() {
 		window.SwapBuffers()
@@ -321,14 +330,14 @@ func main() {
 			}
 			drawTile(location, &pngTile.Tile, pngTile.Texture)
 		}
-	}
 
-	log.Println("Quitting...")
-	for _, tile := range grid.All() {
-		if tile.Texture == nil {
-			continue
+		frames++
+		if time.Since(lastTick) >= time.Second {
+			log.Printf("FPS: %d", frames)
+			lastTick = time.Now()
+			frames = 0
 		}
-
-		gl.DeleteTextures(1, tile.Texture)
 	}
+
+	cleanup(grid)
 }
