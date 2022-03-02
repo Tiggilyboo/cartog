@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	"image/png"
 	"io/ioutil"
 	"net/http"
 	"time"
 
-	"github.com/paulmach/orb/maptile"
 	"github.com/paulmach/osm/osmapi"
 )
 
@@ -26,9 +26,42 @@ type TileDatasource struct {
 	*http.Client
 }
 
+type TileCoord struct {
+	X uint32
+	Y uint32
+	Z uint32
+}
+
 type PngTile struct {
-	Tile  maptile.Tile
-	Image image.Image
+	Tile    TileCoord
+	Image   image.Image
+	Texture *uint32
+}
+
+var EmptyTileImage *image.RGBA
+
+func EmptyPngTile(x, y, z uint32, width, height int) (*PngTile, error) {
+	if EmptyTileImage == nil {
+		img := image.NewRGBA(image.Rectangle{image.Point{0, 0}, image.Point{width, height}})
+		gray := color.RGBA{100, 100, 100, 0xff}
+		for x := 0; x < width; x++ {
+			for y := 0; y < height; y++ {
+				img.Set(x, y, gray)
+			}
+		}
+
+		EmptyTileImage = img
+	}
+
+	return &PngTile{
+		Tile: TileCoord{
+			X: x,
+			Y: y,
+			Z: z,
+		},
+		Image:   EmptyTileImage,
+		Texture: nil,
+	}, nil
 }
 
 func NewPngTile(x uint32, y uint32, z uint32, pngBytes []byte) (*PngTile, error) {
@@ -39,12 +72,13 @@ func NewPngTile(x uint32, y uint32, z uint32, pngBytes []byte) (*PngTile, error)
 	}
 
 	return &PngTile{
-		Tile: maptile.Tile{
+		Tile: TileCoord{
 			X: x,
 			Y: y,
-			Z: maptile.Zoom(z),
+			Z: z,
 		},
-		Image: pngImage,
+		Image:   pngImage,
+		Texture: nil,
 	}, nil
 }
 

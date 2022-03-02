@@ -11,11 +11,12 @@ import (
 
 	"github.com/go-gl/gl/v2.1/gl"
 	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/paulmach/osm/osmapi"
 )
 
 const (
-	SCREEN_X  = 800
-	SCREEN_Y  = 600
+	SCREEN_X  = 1024
+	SCREEN_Y  = 768
 	TILE_X    = 256
 	TILE_Y    = 256
 	GL_TILE_X = float32(TILE_X) / SCREEN_X
@@ -39,10 +40,30 @@ func doWork(f func()) {
 	<-done
 }
 
-func fetchTile(x uint32, y uint32, z uint32) (*tile.PngTile, error) {
+func fetchTile(x uint32, y uint32, z uint32, cancel chan bool) (*tile.PngTile, error) {
 	log.Printf("fetching tile (%d, %d, %d)", x, y, z)
-	t, err := tile.Tile(context.Background(), x, y, z)
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-cancel:
+				log.Printf("Cancelling in-flight tile fetch (%d %d %d)", x, y, z)
+				cancelCtx()
+			}
+		}
+	}()
+
+	t, err := tile.Tile(ctx, x, y, z)
 	if err != nil {
+		// TODO: Handle 404 in a more meaningful way when out of bounds etc.
+		var nfe *osmapi.NotFoundError
+		if errors.As(err, &nfe) {
+			log.Fatalf("%s", nfe.Error())
+			return tile.EmptyPngTile(x, y, z, TILE_X, TILE_Y)
+		}
 		log.Fatalf("%s", err)
 		return nil, err
 	}
@@ -81,13 +102,13 @@ func loadTexture(pngTile *tile.PngTile) (*uint32, error) {
 	return &texture, nil
 }
 
-func drawTile(origin *Coord, coord *TileCoord, texture *uint32) {
-	ox := uint32(origin.X / float32(TILE_X))
-	oy := uint32(origin.Y / float32(TILE_Y))
+func drawTile(origin *Coord, coord *tile.TileCoord, texture *uint32) {
+	ox := origin.X / float32(TILE_X)
+	oy := origin.Y / float32(TILE_Y)
 
 	// Oh, the fun of the OpenGL coordinate system...
-	x1 := float32(coord.X-ox) * GL_TILE_X
-	y1 := -float32(coord.Y-oy) * GL_TILE_Y
+	x1 := (float32(coord.X) - ox) * GL_TILE_X
+	y1 := -(float32(coord.Y) - oy) * GL_TILE_Y
 	x2 := x1 + GL_TILE_X
 	y2 := y1 - GL_TILE_Y
 	x1 = x1*2.0 - 1.0
@@ -110,13 +131,15 @@ func drawTile(origin *Coord, coord *TileCoord, texture *uint32) {
 	gl.End()
 }
 
-func handleTileFetching(tilesToFetch chan TileCoord, grid *TileGrid) {
-	log.Printf("Starting tile fetching goroutine")
+func handleTileLoading(grid *TileGrid) {
 	go func() {
-		for t := range tilesToFetch {
-			go func(t TileCoord) {
+		log.Printf("Starting tile fetching goroutine")
+		defer grid.Close()
+
+		for t := range grid.TilesToLoad {
+			go func(t tile.TileCoord) {
 				log.Printf("texture request %d %d", t.X, t.Y)
-				pngTile, err := fetchTile(t.X, t.Y, t.Z)
+				pngTile, err := fetchTile(t.X, t.Y, t.Z, grid.CancelInflight)
 				if err != nil {
 					log.Fatalf("%s", err)
 					return
@@ -130,25 +153,31 @@ func handleTileFetching(tilesToFetch chan TileCoord, grid *TileGrid) {
 						log.Fatalf("%s", err)
 						return
 					}
+					pngTile.Texture = texture
 
-					grid.SetTile(t, *pngTile, texture)
+					grid.SetTile(t, *pngTile)
 				})
 			}(t)
 		}
-		log.Printf("Stopping tile fetching goroutine")
 	}()
 }
 
 func bindInput(w *glfw.Window) (delta chan Coord) {
+	var mouseButtonAction glfw.Action = 0
+	var mouseButton glfw.MouseButton = 0
+	mousePosX := 0.0
+	mousePosY := 0.0
+	pressed := false
+
 	delta = make(chan Coord)
 
 	w.SetKeyCallback(func(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, mods glfw.ModifierKey) {
 		if action == glfw.Release {
 			return
 		}
-		velocity := float32(1.0)
+		velocity := float32(3.0)
 		if mods&glfw.ModShift != 0 {
-			velocity *= 5.0
+			velocity *= 10.0
 		}
 
 		switch key {
@@ -162,12 +191,63 @@ func bindInput(w *glfw.Window) (delta chan Coord) {
 			}
 		case glfw.KeyUp:
 			delta <- Coord{
-				Y: velocity,
+				Y: -velocity,
 			}
 		case glfw.KeyDown:
 			delta <- Coord{
-				Y: -velocity,
+				Y: velocity,
 			}
+		case glfw.KeyMinus:
+			delta <- Coord{
+				Z: -1.0,
+			}
+		case glfw.KeyEqual:
+			if mods&glfw.ModShift != 0 {
+				delta <- Coord{
+					Z: 1.0,
+				}
+			}
+		}
+	})
+
+	w.SetMouseButtonCallback(func(_ *glfw.Window, button glfw.MouseButton, action glfw.Action, _ glfw.ModifierKey) {
+		mouseButtonAction = action
+		mouseButton = button
+	})
+
+	w.SetCursorPosCallback(func(_ *glfw.Window, xpos float64, ypos float64) {
+		if mouseButton != glfw.MouseButtonLeft {
+			return
+		}
+		log.Printf("mouse button %v action %v (%f, %f)", mouseButton, mouseButtonAction, mousePosX, mousePosY)
+
+		switch mouseButtonAction {
+		case glfw.Release:
+			if !pressed {
+				return
+			}
+			delta <- Coord{
+				X: float32(mousePosX - xpos),
+				Y: float32(mousePosY - ypos),
+			}
+			pressed = false
+
+		case glfw.Press:
+			if pressed {
+				mousePosX -= xpos
+				mousePosY -= ypos
+
+				delta <- Coord{
+					X: float32(mousePosX),
+					Y: float32(mousePosY),
+				}
+				pressed = false
+				return
+			}
+
+			mousePosX = xpos
+			mousePosY = ypos
+			pressed = true
 		}
 	})
 
@@ -204,21 +284,14 @@ func main() {
 		return
 	}
 
-	tilesToFetch := make(chan TileCoord)
-	defer close(tilesToFetch)
-
-	tilesToExpire := make(chan TileCoord)
-	defer close(tilesToExpire)
-
-	go handleTileFetching(tilesToFetch, grid)
+	go handleTileLoading(grid)
 
 	inputDelta := bindInput(window)
 	defer close(inputDelta)
 
-	// TODO: Bind to buttons to move around
 	go func() {
 		for delta := range inputDelta {
-			grid.Move(delta, tilesToFetch, tilesToExpire)
+			grid.Move(delta)
 		}
 	}()
 
@@ -237,14 +310,25 @@ func main() {
 		default:
 		}
 
+		// Draw the map tiles from the cache of loaded textures
 		location := grid.GetLocation()
-		for coord, texture := range grid.Textures() {
-			drawTile(location, &coord, texture)
+		for _, pngTile := range grid.Drawable() {
+			if pngTile == nil {
+				break
+			}
+			if pngTile.Texture == nil {
+				continue
+			}
+			drawTile(location, &pngTile.Tile, pngTile.Texture)
 		}
 	}
 
 	log.Println("Quitting...")
-	for _, texture := range grid.Textures() {
-		gl.DeleteTextures(1, texture)
+	for _, tile := range grid.All() {
+		if tile.Texture == nil {
+			continue
+		}
+
+		gl.DeleteTextures(1, tile.Texture)
 	}
 }
