@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/draw"
 	"log"
-	"math"
 	"runtime"
 	"time"
 
@@ -16,12 +15,8 @@ import (
 )
 
 const (
-	SCREEN_X         = 720
-	SCREEN_Y         = 1440
 	TILE_X           = 256
 	TILE_Y           = 256
-	GL_TILE_X        = float32(TILE_X) / SCREEN_X
-	GL_TILE_Y        = float32(TILE_Y) / SCREEN_Y
 	ZOOM_INTERVAL_MS = 300
 )
 
@@ -94,15 +89,19 @@ func loadTexture(pngTile *tile.PngTile) (*uint32, error) {
 	return &texture, nil
 }
 
-func drawTile(origin *Coord, coord *tile.TileCoord, texture *uint32) {
+func drawTile(wState *WindowState, origin *Coord, coord *tile.TileCoord, texture *uint32) {
 	ox := origin.X / float32(TILE_X)
 	oy := origin.Y / float32(TILE_Y)
 
+	// TODO: cache these
+	scaleX := TILE_X / float32(wState.Width)
+	scaleY := TILE_Y / float32(wState.Height)
+
 	// Oh, the fun of the OpenGL coordinate system...
-	x1 := (float32(coord.X) - ox) * GL_TILE_X
-	y1 := -(float32(coord.Y) - oy) * GL_TILE_Y
-	x2 := x1 + GL_TILE_X
-	y2 := y1 - GL_TILE_Y
+	x1 := (float32(coord.X) - ox) * scaleX
+	y1 := -(float32(coord.Y) - oy) * scaleY
+	x2 := x1 + scaleX
+	y2 := y1 - scaleY
 	x1 = x1*2.0 - 1.0
 	x2 = x2*2.0 - 1.0
 	y1 = y1*2.0 + 1.0
@@ -160,127 +159,6 @@ func handleTileLoading(grid *TileGrid) {
 	}
 }
 
-func bindInput(w *glfw.Window) (delta chan Coord) {
-	delta = make(chan Coord)
-
-	var mouseButtonAction glfw.Action = 0
-	var mouseButton glfw.MouseButton = 0
-	mousePosX := 0.0
-	mousePosY := 0.0
-	pressed := false
-	lastPressed := time.Time{}
-	lastPressedX := 0.0
-	lastPressedY := 0.0
-	clicksWithinInterval := 0
-
-	w.SetKeyCallback(func(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, mods glfw.ModifierKey) {
-		if action == glfw.Release {
-			return
-		}
-		velocity := float32(3.0)
-		if mods&glfw.ModShift != 0 {
-			velocity *= 10.0
-		}
-
-		switch key {
-		case glfw.KeyLeft:
-			delta <- Coord{
-				X: -velocity,
-			}
-		case glfw.KeyRight:
-			delta <- Coord{
-				X: velocity,
-			}
-		case glfw.KeyUp:
-			delta <- Coord{
-				Y: -velocity,
-			}
-		case glfw.KeyDown:
-			delta <- Coord{
-				Y: velocity,
-			}
-		case glfw.KeyMinus:
-			delta <- Coord{
-				Z: -1.0,
-			}
-		case glfw.KeyEqual:
-			if mods&glfw.ModShift != 0 {
-				delta <- Coord{
-					Z: 1.0,
-				}
-			}
-		}
-	})
-
-	w.SetMouseButtonCallback(func(_ *glfw.Window, button glfw.MouseButton, action glfw.Action, _ glfw.ModifierKey) {
-		mouseButtonAction = action
-		mouseButton = button
-		log.Printf("Mouse button action %v button %v lX %f lY %f", mouseButtonAction, mouseButton, lastPressedX-mousePosX, lastPressedY-mousePosY)
-
-		// Check if we have pressed multiple times in the click interval
-		if math.Abs(lastPressedX-mousePosX) < 25.0 &&
-			math.Abs(lastPressedY-mousePosY) < 25.0 &&
-			time.Since(lastPressed) <= time.Duration(ZOOM_INTERVAL_MS)*time.Millisecond {
-
-			log.Printf("Multiclick %d, pressed %v", clicksWithinInterval, pressed)
-			clicksWithinInterval++
-
-			if clicksWithinInterval == 2 {
-				delta <- Coord{
-					Z: 1.0,
-				}
-			}
-		} else {
-			clicksWithinInterval = 0
-		}
-
-		if action == glfw.Release && button == glfw.MouseButtonLeft {
-			lastPressedX = mousePosX
-			lastPressedY = mousePosY
-			lastPressed = time.Now()
-		}
-	})
-
-	w.SetCursorPosCallback(func(_ *glfw.Window, xpos float64, ypos float64) {
-		if mouseButton != glfw.MouseButtonLeft {
-			goto setMousePos
-		}
-
-		switch mouseButtonAction {
-		case glfw.Release:
-			if pressed {
-				lastPressedX = xpos
-				lastPressedY = ypos
-				lastPressed = time.Now()
-			}
-			pressed = false
-
-		case glfw.Press:
-			// Was already pressed (Aka Held)
-			if pressed {
-				delta <- Coord{
-					X: float32(mousePosX - xpos),
-					Y: float32(mousePosY - ypos),
-				}
-			} else {
-				// Mouse button was released, but now pressed
-				pressed = true
-			}
-		}
-
-	setMousePos:
-		if pressed {
-			lastPressedX = xpos
-			lastPressedY = ypos
-			lastPressed = time.Now()
-		}
-		mousePosX = xpos
-		mousePosY = ypos
-	})
-
-	return delta
-}
-
 func cleanup(grid *TileGrid) {
 	log.Println("Quitting...")
 	for _, tile := range grid.All() {
@@ -298,17 +176,12 @@ func main() {
 	}
 	defer glfw.Terminate()
 
-	glfw.WindowHint(glfw.Resizable, glfw.True)
-	glfw.WindowHint(glfw.ContextVersionMajor, 2)
-	glfw.WindowHint(glfw.ContextVersionMinor, 1)
-
-	window, err := glfw.CreateWindow(SCREEN_X, SCREEN_Y, "Cartog", nil, nil)
-	if err != nil {
+	if err := gl.Init(); err != nil {
 		panic(err)
 	}
-	window.MakeContextCurrent()
 
-	if err := gl.Init(); err != nil {
+	windowState, err := NewWindow("Cartog")
+	if err != nil {
 		panic(err)
 	}
 
@@ -316,19 +189,23 @@ func main() {
 		X: 31 * TILE_X,
 		Y: 22 * TILE_Y,
 		Z: 6,
-	}, TILE_X, TILE_Y, SCREEN_X, SCREEN_Y)
+	}, TILE_X, TILE_Y, windowState.Width, windowState.Height)
 	if err != nil {
 		log.Fatalf("%s", err)
 		return
 	}
 
+	windowState.SetResizeCallback(func(w, h uint32) {
+		log.Printf("Window resized (%d, %d), resizing grid...", w, h)
+		grid.Resize(w, h)
+	})
+
 	go handleTileLoading(grid)
 
-	inputDelta := bindInput(window)
-	defer close(inputDelta)
+	defer windowState.Close()
 
 	go func() {
-		for delta := range inputDelta {
+		for delta := range windowState.GetMovementDelta() {
 			grid.Move(delta)
 		}
 	}()
@@ -337,8 +214,8 @@ func main() {
 	lastTick := time.Now()
 
 	log.Println("Starting main loop")
-	for !window.ShouldClose() {
-		window.SwapBuffers()
+	for !windowState.Window.ShouldClose() {
+		windowState.Window.SwapBuffers()
 		glfw.PollEvents()
 
 		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
@@ -360,7 +237,7 @@ func main() {
 			if pngTile.Texture == nil {
 				continue
 			}
-			drawTile(location, &pngTile.Tile, pngTile.Texture)
+			drawTile(windowState, location, &pngTile.Tile, pngTile.Texture)
 		}
 
 		frames++
