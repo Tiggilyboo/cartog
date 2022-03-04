@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
@@ -15,6 +17,11 @@ type WindowState struct {
 func getInitialResolution() (int, int) {
 	monitor := glfw.GetPrimaryMonitor()
 	modes := monitor.GetVideoModes()
+
+	log.Printf("Monitor (%v)", *monitor)
+	for i, m := range modes {
+		log.Printf("Mode %d (%v)", i, m)
+	}
 	firstMode := modes[0]
 
 	return firstMode.Width, firstMode.Height
