@@ -122,6 +122,12 @@ func drawTile(wState *WindowState, origin *Coord, coord *tile.TileCoord, texture
 	gl.End()
 }
 
+func handleGridMovement(windowState *WindowState, grid *TileGrid) {
+	for delta := range windowState.GetMovementDelta() {
+		grid.Move(delta)
+	}
+}
+
 func handleTileLoading(grid *TileGrid) {
 	log.Printf("Starting tile fetching goroutine")
 	defer grid.Close()
@@ -184,12 +190,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer windowState.Close()
 
-	grid, err := NewTileGrid(Coord{
-		X: 31 * TILE_X,
-		Y: 22 * TILE_Y,
-		Z: 6,
-	}, TILE_X, TILE_Y, windowState.Width, windowState.Height)
+	// TODO: "Current" location
+	origin := Coord{
+		X: 6 * TILE_X,
+		Y: 4 * TILE_Y,
+		Z: 4,
+	}
+	grid, err := NewTileGrid(origin, TILE_X, TILE_Y, windowState.Width, windowState.Height)
 	if err != nil {
 		log.Fatalf("%s", err)
 		return
@@ -201,14 +210,7 @@ func main() {
 	})
 
 	go handleTileLoading(grid)
-
-	defer windowState.Close()
-
-	go func() {
-		for delta := range windowState.GetMovementDelta() {
-			grid.Move(delta)
-		}
-	}()
+	go handleGridMovement(windowState, grid)
 
 	frames := 0
 	lastTick := time.Now()

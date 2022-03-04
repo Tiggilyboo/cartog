@@ -56,13 +56,13 @@ func (c *Coord) Add(a Coord) {
 
 }
 
-func NewTileGrid(current Coord, tileWidth, tileHeight, viewWidth, viewHeight uint32) (*TileGrid, error) {
+func NewTileGrid(origin Coord, tileWidth, tileHeight, viewWidth, viewHeight uint32) (*TileGrid, error) {
 	if tileWidth == 0 || tileHeight == 0 {
 		return nil, errors.New("tile width and height must be positive")
 	}
 
 	grid := &TileGrid{
-		location:      current,
+		location:      origin,
 		cache:         sync.Map{},
 		loading:       sync.Map{},
 		TilesToLoad:   make(chan tile.TileCoord),
@@ -75,7 +75,7 @@ func NewTileGrid(current Coord, tileWidth, tileHeight, viewWidth, viewHeight uin
 		halfTileHeight: float32(tileHeight) / 2.0,
 	}
 	grid.Resize(viewWidth, viewHeight)
-	grid.SetLocation(current)
+	grid.SetLocation(origin)
 
 	return grid, nil
 }

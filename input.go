@@ -28,13 +28,39 @@ func NewInputState(w *glfw.Window) (*InputState, error) {
 	}
 
 	w.SetKeyCallback(state.inputKeypressCallback)
+	w.SetCharCallback(state.inputCharCallback)
+
 	w.SetMouseButtonCallback(state.inputMouseButtonCallback)
 	w.SetCursorPosCallback(state.inputCursorPosCallback)
+	w.SetScrollCallback(state.inputScrollCallback)
 
 	return state, nil
 }
 
-func (state *InputState) inputKeypressCallback(_ *glfw.Window, key glfw.Key, scanCode int, action glfw.Action, mods glfw.ModifierKey) {
+func (state *InputState) inputCharCallback(_ *glfw.Window, ch rune) {
+	delta := Coord{}
+	switch ch {
+	case '-':
+		delta.Z = -1.0
+	case '+':
+		delta.Z = 1.0
+	default:
+		return
+	}
+
+	state.MoveDelta <- delta
+}
+
+func (state *InputState) inputScrollCallback(_ *glfw.Window, dX, dY float64) {
+	if uint32(dY) == 0 {
+		return
+	}
+	state.MoveDelta <- Coord{
+		Z: float32(dY),
+	}
+}
+
+func (state *InputState) inputKeypressCallback(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, mods glfw.ModifierKey) {
 	if action == glfw.Release {
 		return
 	}
@@ -53,13 +79,6 @@ func (state *InputState) inputKeypressCallback(_ *glfw.Window, key glfw.Key, sca
 		delta.Y = -velocity
 	case glfw.KeyDown:
 		delta.Y = velocity
-	case glfw.KeyMinus:
-		delta.Z = -1.0
-	case glfw.KeyEqual:
-		if mods&glfw.ModShift == 0 {
-			return
-		}
-		delta.Z = 1.0
 	default:
 		return
 	}
