@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/draw"
 	"log"
+	"math"
 	"runtime"
 	"time"
 
@@ -15,12 +16,13 @@ import (
 )
 
 const (
-	SCREEN_X  = 1024
-	SCREEN_Y  = 768
-	TILE_X    = 256
-	TILE_Y    = 256
-	GL_TILE_X = float32(TILE_X) / SCREEN_X
-	GL_TILE_Y = float32(TILE_Y) / SCREEN_Y
+	SCREEN_X         = 720
+	SCREEN_Y         = 1440
+	TILE_X           = 256
+	TILE_Y           = 256
+	GL_TILE_X        = float32(TILE_X) / SCREEN_X
+	GL_TILE_Y        = float32(TILE_Y) / SCREEN_Y
+	ZOOM_INTERVAL_MS = 300
 )
 
 var glWorkPipeline = make(chan func())
@@ -159,13 +161,17 @@ func handleTileLoading(grid *TileGrid) {
 }
 
 func bindInput(w *glfw.Window) (delta chan Coord) {
+	delta = make(chan Coord)
+
 	var mouseButtonAction glfw.Action = 0
 	var mouseButton glfw.MouseButton = 0
 	mousePosX := 0.0
 	mousePosY := 0.0
 	pressed := false
-
-	delta = make(chan Coord)
+	lastPressed := time.Time{}
+	lastPressedX := 0.0
+	lastPressedY := 0.0
+	clicksWithinInterval := 0
 
 	w.SetKeyCallback(func(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, mods glfw.ModifierKey) {
 		if action == glfw.Release {
@@ -209,41 +215,67 @@ func bindInput(w *glfw.Window) (delta chan Coord) {
 	w.SetMouseButtonCallback(func(_ *glfw.Window, button glfw.MouseButton, action glfw.Action, _ glfw.ModifierKey) {
 		mouseButtonAction = action
 		mouseButton = button
+		log.Printf("Mouse button action %v button %v lX %f lY %f", mouseButtonAction, mouseButton, lastPressedX-mousePosX, lastPressedY-mousePosY)
+
+		// Check if we have pressed multiple times in the click interval
+		if math.Abs(lastPressedX-mousePosX) < 25.0 &&
+			math.Abs(lastPressedY-mousePosY) < 25.0 &&
+			time.Since(lastPressed) <= time.Duration(ZOOM_INTERVAL_MS)*time.Millisecond {
+
+			log.Printf("Multiclick %d, pressed %v", clicksWithinInterval, pressed)
+			clicksWithinInterval++
+
+			if clicksWithinInterval == 2 {
+				delta <- Coord{
+					Z: 1.0,
+				}
+			}
+		} else {
+			clicksWithinInterval = 0
+		}
+
+		if action == glfw.Release && button == glfw.MouseButtonLeft {
+			lastPressedX = mousePosX
+			lastPressedY = mousePosY
+			lastPressed = time.Now()
+		}
 	})
 
 	w.SetCursorPosCallback(func(_ *glfw.Window, xpos float64, ypos float64) {
 		if mouseButton != glfw.MouseButtonLeft {
-			return
+			goto setMousePos
 		}
 
 		switch mouseButtonAction {
 		case glfw.Release:
-			if !pressed {
-				return
-			}
-			delta <- Coord{
-				X: float32(mousePosX - xpos),
-				Y: float32(mousePosY - ypos),
+			if pressed {
+				lastPressedX = xpos
+				lastPressedY = ypos
+				lastPressed = time.Now()
 			}
 			pressed = false
 
 		case glfw.Press:
+			// Was already pressed (Aka Held)
 			if pressed {
-				mousePosX -= xpos
-				mousePosY -= ypos
-
 				delta <- Coord{
-					X: float32(mousePosX),
-					Y: float32(mousePosY),
+					X: float32(mousePosX - xpos),
+					Y: float32(mousePosY - ypos),
 				}
-				pressed = false
-				return
+			} else {
+				// Mouse button was released, but now pressed
+				pressed = true
 			}
-
-			mousePosX = xpos
-			mousePosY = ypos
-			pressed = true
 		}
+
+	setMousePos:
+		if pressed {
+			lastPressedX = xpos
+			lastPressedY = ypos
+			lastPressed = time.Now()
+		}
+		mousePosX = xpos
+		mousePosY = ypos
 	})
 
 	return delta
