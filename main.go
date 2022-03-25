@@ -204,9 +204,11 @@ func main() {
 		return
 	}
 
+	viewResized := false
 	windowState.SetResizeCallback(func(w, h uint32) {
 		log.Printf("Window resized (%d, %d), resizing grid...", w, h)
 		grid.Resize(w, h)
+		viewResized = true
 	})
 
 	go handleTileLoading(grid)
@@ -220,6 +222,12 @@ func main() {
 		windowState.Window.SwapBuffers()
 		glfw.PollEvents()
 
+		if viewResized {
+			newWidth, newHeight := grid.ViewSize()
+			gl.Viewport(0, 0, int32(newWidth), int32(newHeight))
+
+			viewResized = false
+		}
 		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 		gl.LoadIdentity()
 

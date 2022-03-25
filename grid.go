@@ -248,3 +248,10 @@ func (grid *TileGrid) FetchTile(x uint32, y uint32, z uint32, cancel chan func()
 
 	return t, nil
 }
+
+func (grid *TileGrid) ViewSize() (width float32, height float32) {
+	width = grid.viewWidth
+	height = grid.viewHeight
+
+	return width, height
+}
